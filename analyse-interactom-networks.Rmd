@@ -1,0 +1,348 @@
+% Analyses of interactoms
+% Beáta B. Tóth
+% `r date()`
+
+---
+bibliography: /home/apa/notes/articles.bib
+natbib: true
+biblio-files: /home/apa/notes/articles.bib
+biblio-style: /home/apa/lib/texinputs/AmNat
+biblio-title: References
+fontsize: 12pt
+papersize: a4paper
+include-before:
+- \linenumbers
+header-includes:
+- \usepackage{double_spaced}
+geometry:
+- margin=1in
+---
+
+```{r set-up, include=FALSE}
+## set the working directory
+## load the libraries
+library(openxlsx)
+library(igraph)
+## load local code
+source("~/lib/markdown/produce_output.R")
+```
+
+# Aims
+
+In this project we analyse gene interactom networks. We
+
+- create the networks from edge lists,
+- plot them,
+- calculate network measures for the node
+- identify bridges.
+
+# Functions
+
+To do these items we first develop a couple functions to be able to repeat the tasks for different edge lists.
+
+This function create a weighted undirected network from an edge list stored in `fname`.
+
+```{r fun-cr-net}
+create.network <- function(fname) {
+	gn.df <- read.table(file=pipe(paste("sed 's/^#//' '", fname, "'", sep="")),
+											header=TRUE, sep="\t")
+	m <- as.matrix(gn.df[,1:2])
+	gn.graph <- graph_from_edgelist(m, directed=FALSE)
+	E(gn.graph)$weight <- gn.df$combined_score
+	gn.graph
+}
+```
+
+This function plot the network. If community information given than colour the nodes according their community membership.
+
+```{r fun-pl-net}
+plot.network <- function(g, g.community=NULL, l.cex=1) {
+	V(g)$size = 2.5
+	E(g)$width = 5*E(g)$weight
+	if(is.null(g.community)) {
+		plot(g)
+	} else {
+	gn.memb <- membership(g.community)
+	m.l <- tapply(names(gn.memb), gn.memb, unique)
+	plot(g, vertex.color=gn.memb, vertex.label.cex=l.cex)#, vertex.label=NA)
+	}
+}
+```
+
+This function calculates the network measures of interest. If no community information is given it search for community structure. It calculates betweenness and strength (sum of edge weights of a node) and bridges. If `xlsx.file` is given it saves the results in the corresponding file.
+
+```{r fun-calc-net}
+calculate.measures <- function(g, g.community=NULL, xlsx.file=NULL) {
+	g.betweenness <- betweenness(g)
+	g.strength <- strength(g)
+	g.degree <- degree(g)
+	if(is.null(g.community)) {
+		g.community <- cluster_fast_greedy(g)
+	}
+	g.bridges <- crossing(g.community, g)
+	bn <- list()
+	bn.n <- list()
+	bb <- names(g.bridges)[g.bridges]
+	for(n in names(g.betweenness)) {
+		a <- bb[grep(n, bb)]
+		bn[[n]] <- paste(paste("<", a, ">", sep=""), collapse=" ")
+		bn.n[[n]] <- length(a)
+	}
+	bn.df <- data.frame(gene=names(g.betweenness), degree=g.degree, strength=
+											g.strength, betweenness=g.betweenness,
+											n.bridges=unlist(bn.n), bridges=unlist(bn))
+	if(is.null(xlsx.file)) {
+		return(bn.df) 
+	} else {
+    write.xlsx(bn.df, file=xlsx.file)
+	}
+}
+```
+
+This function removes characters which can cause problems from file names and replaces the default extension of `.tsv` to the given extension.
+
+```{r mk-filename}
+mk.filename <- function(n, extension=".pdf") {
+	f <- gsub(",", "-", n)
+	f <- gsub(" +", "_", f)
+	f <- gsub("[()]", "", f)
+	f <- sub("\\..sv$", extension, f)
+	f
+}
+```
+
+# Process the edge lists
+
+First, we get the list of edge list files. These files have a `.tsv` extension.
+By setting the `path` argument of `list.files` we can choose between directories containing cohesive data files.
+
+```{r get-file-lists}
+el.ls <- list.files(pattern=".*\\.tsv$", path="./data2020-03-10",
+										full.names=TRUE)
+```
+
+Next we create the networks and search for their community structure at the same time.
+
+```{r create-nets}
+g.ls <- list()
+c.ls <- list()
+for(f in el.ls) {
+	g <- create.network(f)
+	g.ls[[f]] <- g
+	c.ls[[f]] <- cluster_fast_greedy(g)
+}
+```
+
+In the following, we plot the networks into files.
+
+```{r plot-nets}
+for(n in names(g.ls)) {
+	f <- mk.filename(n)
+	pdf(file=f, width=10, height=10)
+	plot.network(g.ls[[n]], c.ls[[n]], 0.5)
+	dev.off()
+}
+```
+
+Finally, we calculate the network measures and save them in a file.
+
+```{r measures-nets}
+for(n in names(g.ls)) {
+	f <- mk.filename(n, ".xlsx")
+	calculate.measures(g.ls[[n]], c.ls[[n]], f)
+}
+```
+
+# Determining bridges between brown and white
+
+Here we try to identify the bridges between the communities defined by whether their genes belongs to the `white` or to the `brown` protocol(?).
+
+First, we load the edge list and create the graph.
+
+```{r load-wb}
+f <- "731GenesWandB string_interactions (2).tsv"
+g <- create.network(f)
+```
+
+Next, we load the membership information.
+
+```{r load-membership-data}
+#m <- "731genesInteractomeWhite(427)Brown(301)Both(3).xlsx"
+m <- "731genesInteractomeWhite(427)Brown(301)Both(3)Új.xlsx"
+m.l <- read.xlsx(m)
+names(m.l) <- c("Genes", "ColorCode")
+```
+
+This list contains code for genes being in either community `white`, `brown` or both. We analyse the data in two ways. First, genes belonging to both communities are considered as part of community `white`. Second, they will be part of community `brown`.
+
+## Case 1
+
+Construct communities.
+
+```{r contsruct-bW}
+white.genes <- m.l$Genes[m.l$ColorCode != "#FF4500"]
+brown.genes <- m.l$Genes[m.l$ColorCode == "#FF4500"]
+comm <- rep(0, length(V(g)))
+names(comm) <- names(V(g))
+comm[names(comm) %in% white.genes] = 1
+comm[names(comm) %in% brown.genes] = 2
+g.communities <- list(membership=comm)
+```
+
+Calculate measures.
+
+```{r calc-white-measures}
+ff <- mk.filename(f, "-white.xlsx")
+calculate.measures(g, g.communities, ff)
+```
+
+## Case 2
+
+Construct communities.
+
+```{r contsruct-bW}
+white.genes <- m.l$Genes[m.l$ColorCode == "#00BFFF"]
+brown.genes <- m.l$Genes[m.l$ColorCode != "#00BFFF"]
+comm <- rep(0, length(V(g)))
+names(comm) <- names(V(g))
+comm[names(comm) %in% white.genes] = 1
+comm[names(comm) %in% brown.genes] = 2
+g.communities <- list(membership=comm)
+```
+
+Calculate measures.
+
+```{r calc-white-measures}
+ff <- mk.filename(f, "-brown.xlsx")
+calculate.measures(g, g.communities, ff)
+```
+
+# Determining bridges between brown and white (3705 genes)
+
+Here we try to identify the bridges between the communities defined by whether their genes belongs to the `white`, to the `brown` or both pathways.
+
+First, we load the edge list and create the graph.
+
+```{r load-wbb}
+create.network2 <- function(fname) {
+	gn.df <- read.csv(file=fname)
+	m <- matrix(unlist(strsplit(gn.df$name, " \\(pp\\) ")), ncol=2,
+								 byrow=TRUE)
+	gn.graph <- graph_from_edgelist(m, directed=FALSE)
+	E(gn.graph)$weight <- gn.df$stringdb..score
+	V(gn.graph)$name <- gsub("-", "", names(V(gn.graph)))
+	gn.graph
+}
+f <- "3706String Network default edge.csv"
+g <- create.network2(f)
+```
+
+Next, we load the membership information.
+
+```{r load-membership-data-wbb}
+m <- "3705GenesAndPathname.xlsx"
+m.l <- read.xlsx(m)
+```
+
+This list contains code for genes being in either community `white`, `brown` or both. Nevertheless, `string` does something wrong, it serves information for some genes under an alternative name. Here we correct these alternatives. Note, we do not have an alternative name for all problematic genes. We these unknown genes we create a fourth category.
+
+```{r patch-gene-list}
+m2 <- "ÚjNevekwithPath3705ből.xlsx"
+m2.l <- read.xlsx(m2)
+m.l <- m.l[order(m.l$GENE),]
+m2.l <- m2.l[order(m2.l$Eredeti.név),]
+i <- m.l$GENE %in% m2.l$Eredeti.név
+m.l$GENE[i] <- m2.l$Új.név
+gn <- gsub("-", "", m.l$GENE)
+m.l$GENE <- gn
+```
+
+We construct communities.
+
+```{r contsruct-wbb}
+white.genes <- m.l$GENE[m.l$Pathway == "WHITE"]
+brown.genes <- m.l$GENE[m.l$Pathway == "BROWN"]
+both.genes <- m.l$GENE[m.l$Pathway == "Both W+B"]
+comm <- rep(4, length(V(g)))
+names(comm) <- names(V(g))
+comm[names(comm) %in% white.genes] = 1
+comm[names(comm) %in% brown.genes] = 2
+comm[names(comm) %in% both.genes] = 3
+g.communities <- list(membership=comm)
+```
+
+Calculate measures.
+
+```{r fun-calc-net2}
+calculate.measures2 <- function(g, g.community=NULL, xlsx.file=NULL) {
+	g.betweenness <- betweenness(g)
+	g.strength <- strength(g)
+	g.degree <- degree(g)
+	if(is.null(g.community)) {
+		g.community <- cluster_fast_greedy(g)
+	}
+	r.comm <- range(g.community$membership)
+	g.ls <- list()
+	for(i in r.comm[1]:r.comm[2]) {
+		g.ls[[i]] <- induced.subgraph(g, g.community$membership == i)
+	}
+	g.bridges <- crossing(g.community, g)
+	bn <- list(list(), list(), list(), list())
+	bn.n <- list(list(), list(), list(), list())
+	#btwn <- list()
+	bb <- names(g.bridges)[g.bridges]
+	for(n in names(g.betweenness)) {
+		nr <- paste("\\<", n, "\\>", sep="")
+		a <- bb[grep(nr, bb)]
+		b <- sub(nr, "", a)
+		b <- gsub("\\|", "", b)
+		k <- g.community$membership[b]
+		nc <- g.community$membership[n]
+		#btwn[[n]] <- betweenness(g.ls[[nc]], n)
+		for(i in r.comm[1]:r.comm[2]) {
+			bn.n[[i]][[n]] <- sum(k == i)
+			bn[[i]][[n]] <- paste(names(k)[k==i], collapse=", ")
+		}
+	}
+	bn.df <- data.frame(gene=names(g.betweenness), degree=g.degree, strength=
+											g.strength, betweenness=g.betweenness,
+											#comm.betweenness = unlist(btwn), 
+											n.bridges.w=unlist(bn.n[[1]]), bridges.w=unlist(bn[[1]]),
+											n.bridges.b=unlist(bn.n[[2]]), bridges.b=unlist(bn[[2]]),
+											n.bridges.wb=unlist(bn.n[[3]]),bridges.wb=unlist(bn[[3]]),
+											n.bridges.n=unlist(bn.n[[4]]), bridges.n=unlist(bn[[4]]))
+	if(is.null(xlsx.file)) {
+		return(bn.df) 
+	} else {
+    write.xlsx(bn.df, file=xlsx.file)
+	}
+}
+```
+
+
+```{r calc-wb}
+ff <- mk.filename(f, "-wb.xlsx")
+calculate.measures2(g, g.communities, ff)
+ff <- mk.filename(f, "-origin.xlsx")
+calculate.measures(g, xlsx.file=ff)
+```
+
+Calculating measures within brown and white pathways. We merge those genes to the given pathway for which we do not have sure pathway identification (group 3 and 4 in `g.communities`).
+
+```{r comm-btwnss}
+g.white <- induced.subgraph(g, g.communities$membership != 2)
+ff <- mk.filename(f, "-white_pathways.xlsx")
+calculate.measures(g.white, xlsx.file=ff)
+g.brown <- induced.subgraph(g, g.communities$membership != 1)
+ff <- mk.filename(f, "-brown_pathways.xlsx")
+calculate.measures(g.brown, xlsx.file=ff)
+
+```
+
+# End matters
+
+```{r session-info, include=TRUE, echo=TRUE, results="markup"}
+sessionInfo()
+```
+
+<!-- vim: set foldmethod=syntax: -->
